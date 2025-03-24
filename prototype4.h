@@ -5,7 +5,13 @@
 #include <stdio.h>
 #include "driver/adc.h"
 #include "esp_adc_cal.h"
+#include "esp_log.h"
+#include "esp_timer.h"
 
+
+#define ADC_MAX_VALUE 4095      // For 12-bit ADC resolution
+#define VREF 1100               // Default VREF for ESP32, in mV (can vary depending on board)
+static const char *TAG = "SENSOR";
 #define MAX_ECHO_TIMEOUT_US 100 
 
 // Define Transistor GPIO Pins (Motor Drivers)
@@ -34,23 +40,21 @@
 #define JOYSTICK_LR ADC_CHANNEL_7 // Left/Right -> adc pin 6
 
 // ADC Calibration
-esp_adc_cal_characteristics_t *adc_chars;
 #define DEFAULT_VREF 1100  // Default reference voltage (mV)
 #define ADC_WIDTH ADC_WIDTH_BIT_12
-#define ADC_ATTEN ADC_ATTEN_DB_11
+#define ADC_ATTEN ADC_ATTEN_DB_12
 
 // Joystick Calibration
-int UPMID = 0;   // Center position for Up/Down
-int LRMID = 0;   // Center position for Left/Right
-int MID_TOLERANCE = 100;  // Dead zone threshold (adjust as needed)
-int sensor_fault = 0;
+extern int UPMID;   // Center position for Up/Down
+extern int LRMID;   // Center position for Left/Right
+extern int sensor_fault;
+
 
 void echo_sensor(void *pvParameter); //1
 void motor_controller(void); //2
-void control_wheelchair(int left_forward, int left_reverse, int right_forward, int right_reverse); //3
-void init_gpio(void);
+void init_gpio(void); 
 void init_adc(void);
 int read_joystick(adc_channel_t channel);
-void calibrate_joystick(void);
+int calibrate_joystick(adc_channel_t channel);
 void trigger_sensor(int trigger_pin, int echo_pin, float *distance);
 
