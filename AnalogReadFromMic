@@ -1,0 +1,96 @@
+// main.c for the Analog read from mic that prints just a number for Edge Impulse to read 
+
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_adc/adc_continuous.h"
+#include "esp_err.h"
+
+#define SAMPLE_RATE_HZ 16000
+#define DMA_BUF_LEN    1024  // DMA buffer size in bytes
+
+// ADC configuration: using ADC_UNIT_1, channel 4, 12dB attenuation, 12-bit resolution.
+#define ADC_UNIT     ADC_UNIT_1
+#define ADC_CHANNEL  ADC_CHANNEL_4
+#define ADC_ATTEN    ADC_ATTEN_DB_12
+#define ADC_BITWIDTH ADC_BITWIDTH_12
+
+static adc_continuous_handle_t adc_handle = NULL;
+
+// Define the ADC pattern as a static array.
+static adc_digi_pattern_config_t adc_pattern[1] = {
+    {
+        .atten     = ADC_ATTEN,
+        .channel   = ADC_CHANNEL,
+        .unit      = ADC_UNIT,
+        .bit_width = ADC_BITWIDTH,
+    }
+};
+
+void app_main(void)
+{
+    esp_err_t ret;
+    
+    // Create a continuous ADC handle with a storage buffer.
+    adc_continuous_handle_cfg_t handle_cfg = {
+        .max_store_buf_size = 1024,
+        .conv_frame_size    = DMA_BUF_LEN,
+    };
+    ret = adc_continuous_new_handle(&handle_cfg, &adc_handle);
+    if (ret != ESP_OK) {
+        printf("Failed to create ADC continuous handle: %d\n", ret);
+        return;
+    }
+    
+    // Configure the ADC continuous mode.
+    adc_continuous_config_t adc_config = {
+        .sample_freq_hz = SAMPLE_RATE_HZ,
+        .conv_mode      = ADC_CONV_SINGLE_UNIT_1,
+        .format         = ADC_DIGI_OUTPUT_FORMAT_TYPE2,  // Must use TYPE2 format
+        .pattern_num    = 1,
+        .adc_pattern    = adc_pattern,
+    };
+    ret = adc_continuous_config(adc_handle, &adc_config);
+    if (ret != ESP_OK) {
+        printf("Failed to configure ADC continuous: %d\n", ret);
+        return;
+    }
+    
+    // Start ADC continuous conversion.
+    ret = adc_continuous_start(adc_handle);
+    if (ret != ESP_OK) {
+        printf("Failed to start ADC continuous: %d\n", ret);
+        return;
+    }
+    
+    // Allocate a DMA buffer.
+    uint8_t dma_buffer[DMA_BUF_LEN];
+    uint32_t ret_len = 0;
+    
+    // Infinite loop: continuously read and print ADC samples.
+    while (1) {
+        ret = adc_continuous_read(adc_handle, dma_buffer, DMA_BUF_LEN, &ret_len, 1000);
+        if (ret == ESP_OK) {
+            // In TYPE2 format, each sample is 4 bytes.
+            int words = ret_len / sizeof(uint32_t);
+            uint32_t *data_32 = (uint32_t *)dma_buffer;
+            for (int i = 0; i < words; i++) {
+                // Extract the lower 12 bits (the ADC value).
+                uint16_t adc_value = data_32[i] & 0xfff;
+                // Print the integer value.
+                printf("%d\n", adc_value);
+            }
+        } else if (ret == ESP_ERR_TIMEOUT) {
+            // No data within timeout; yield briefly.
+            vTaskDelay(pdMS_TO_TICKS(1));
+        } else {
+            printf("ADC continuous read error: %d\n", ret);
+        }
+        // Yield to allow other tasks to run.
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    
+    // Normally you would stop and deinit, but in this infinite loop we never reach here.
+    // adc_continuous_stop(adc_handle);
+    // adc_continuous_deinit(adc_handle);
+}
