@@ -1,51 +1,74 @@
 #include "prototype4.h"
+int sensor_fault;
+#define NUM_SENSORS 6
+#define OBSTACLE_THRESHOLD 35  // Obstacle detection threshold in cm (increase to increase threshold radius around wheelchair)
+#define EXPECTED_DOWNWARD 25.4
+#define DOWNWARD_TOLERANCE 5.0
+#define FAULT_THRESHOLD 2
 
-#define ALPHA 0.2  // Smoothing factor (Adjust between 0.1 - 0.9 for responsiveness)
-#define SENSOR_DELAY_MS 10  // Delay to avoid interference
 
 void echo_sensor(void *pvParameter) {
-    float distances[6];   // Raw distances
-    float ema_distances[6] = {0};  // Smoothed distances
-    bool first_reading[6] = {true}; // First-time flags
+    int trigPins[NUM_SENSORS] = {TRIGGER1, TRIGGER2, TRIGGER3, TRIGGER4, TRIGGER5, TRIGGER6};
+    int echoPins[NUM_SENSORS] = {ECHO1, ECHO2, ECHO3, ECHO4, ECHO5, ECHO6};
+    int too_close_count[4] = {0};
+    static bool downward_fault = false;  // Persists across iterations
+    ESP_LOGW(TAG, "CODE RESET");
 
-    int triggers[6] = {TRIGGER1, TRIGGER2, TRIGGER1, TRIGGER2, TRIGGER1, TRIGGER2};  
-    int echoes[6] = {ECHO1, ECHO2, ECHO3, ECHO4, ECHO5, ECHO6};
+    while (1) {
+        for (int i = 0; i < NUM_SENSORS; i++) {
+            float distance = trigger_sensor(trigPins[i], echoPins[i]);
+            ESP_LOGI(TAG, "Sensor %d raw distance: %.2f cm", i + 1, distance);
 
-    while (true) {
-        for (int i = 0; i < 6; i++) {
-            trigger_sensor(triggers[i], echoes[i], &distances[i]);  // Trigger one sensor at a time
-
-            if (distances[i] > 0) {  // Ignore invalid readings (-1)
-                if (first_reading[i]) {
-                    ema_distances[i] = distances[i];  // Initialize with first valid reading
-                    first_reading[i] = false;
-                } else {
-                    ema_distances[i] = (ALPHA * distances[i]) + ((1 - ALPHA) * ema_distances[i]);
+            if (distance > 0) {
+                if (i < 4) {  // Sensors 1–4: Check for obstacles
+                    if (distance <= OBSTACLE_THRESHOLD) {
+                        too_close_count[i]++;
+                        if(too_close_count[i] >= 10){
+                            too_close_count[i] = 10;
+                        }
+                    } else if (too_close_count[i] > 0) {
+                        too_close_count[i] -= 2;  // Faster decrement when cleared
+                        if (too_close_count[i] < 0) {
+                            too_close_count[i] = 0;  // Ensure it doesn't go negative
+                        }
+                    }
                 }
-
-                ESP_LOGI(TAG, "Sensor %d - EMA Distance: %.2f cm", i + 1, ema_distances[i]);
+                else {  // Sensors 5–6: Check downward sensor range
+                    if (distance < EXPECTED_DOWNWARD - DOWNWARD_TOLERANCE ||
+                        distance > EXPECTED_DOWNWARD + DOWNWARD_TOLERANCE) {
+                        downward_fault = true;
+                        ESP_LOGW(TAG, "Downward sensor %d out of range: %.2f cm", i + 1, distance);
+                    } else {
+                        downward_fault = false;  // Clear downward fault if back in range
+                    }
+                }
+            } else {
+                ESP_LOGW(TAG, "Sensor %d OUT OF RANGE or not working", i + 1);
             }
 
-            vTaskDelay(pdMS_TO_TICKS(SENSOR_DELAY_MS));  // **Delay before triggering next sensor**
+            vTaskDelay(pdMS_TO_TICKS(50));
         }
 
-        // Ledge Detection Logic (Sensors 5 & 6)
-        if (ema_distances[4] >= 20 && ema_distances[5] >= 20) {
-            ESP_LOGW(TAG, "Ledge Detected!");
-            sensor_fault = 1;
+        // Check for sensor faults
+        sensor_fault = downward_fault;
+        for (int i = 0; i < 4; i++) {
+            if (too_close_count[i] >= FAULT_THRESHOLD) {
+                sensor_fault = 1;
+                break;
+            }
+        }
+
+        if (sensor_fault) {
+            ESP_LOGE(TAG, "SENSOR FAULT TRIGGERED");
         } else {
-            ESP_LOGI(TAG, "Safe - No Ledge");
-            sensor_fault = 0;
+            ESP_LOGW(TAG, "No Sensor fault");
         }
 
-        // Wheelchair Shutdown Logic (Sensors 1 & 2 )
-        if (ema_distances[0] < 20 || ema_distances[1] < 20 || ema_distances[2] < 20 || ema_distances[3] < 20) {
-            ESP_LOGE(TAG, "Obstacle too close! Stopping wheelchair...");
-            sensor_fault = 1;
-        }
-        else{
-            ESP_LOGI(TAG, "Safe - No Obstacle");
-            sensor_fault = 0;
-        }
+        ESP_LOGI(TAG, "Fault states: Too close counts [%d, %d, %d, %d], Downward fault: %d",
+                 too_close_count[0], too_close_count[1], too_close_count[2], too_close_count[3], downward_fault);
+
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
+
+

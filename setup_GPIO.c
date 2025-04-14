@@ -11,20 +11,19 @@ void init_gpio() {
         gpio_set_direction(pins[i], GPIO_MODE_OUTPUT);
         gpio_set_level(pins[i], 0);  // Default to OFF
     }
-
     int pins1[] = {ECHO1, ECHO2, ECHO3, ECHO4, ECHO5, ECHO6};
+    int trigg[] = {TRIGGER1, TRIGGER2, TRIGGER3, TRIGGER4, TRIGGER5, TRIGGER6};
+    
     for (int i = 0; i < 6; i++) {
         gpio_reset_pin(pins1[i]);
         gpio_set_direction(pins1[i], GPIO_MODE_INPUT);
-        gpio_set_pull_mode(pins1[i], GPIO_FLOATING);  // Default to OFF
+        gpio_set_pull_mode(pins1[i], GPIO_PULLUP_DISABLE);  // disable internal pullups/pulldowns
+    
+        gpio_reset_pin(trigg[i]);
+        gpio_set_direction(trigg[i], GPIO_MODE_OUTPUT);
+        gpio_set_level(trigg[i], 0);
     }
-
-    gpio_set_direction(TRIGGER1, GPIO_MODE_OUTPUT);
-    gpio_set_level(TRIGGER1, 0);
-    gpio_set_direction(TRIGGER2, GPIO_MODE_OUTPUT);
-    gpio_set_level(TRIGGER2, 0);
-    gpio_set_direction(TRIGGER3, GPIO_MODE_OUTPUT);
-    gpio_set_level(TRIGGER3, 0);
+    
 
 }
 
