@@ -48,7 +48,7 @@ typedef enum {      // Command enumeration for motion states
     CMD_NONE = 0, CMD_FORWARD, CMD_BACKWARD, CMD_LEFT, CMD_RIGHT, CMD_STOP  // Possible commands
 } Command;      // Alias name ofr the enum type
 
-static const float   CONF_THRESH   = 0.75f;  // tune per model
+static const float   CONF_THRESH   = 0.95f;  // tune per model
 static const uint8_t STABLE_FRAMES = 1;      // require N identical frames; Smoothing: consecutive agreement count
 
 // ---------- LATCH + optional safety timeout knobs ----------
