@@ -47,13 +47,13 @@ void echo_sensor(void *pvParameter) {
                     if (distance_cm < (EXPECTED_DOWNWARD - DOWNWARD_TOLERANCE) ||
                         distance_cm > (EXPECTED_DOWNWARD + DOWNWARD_TOLERANCE)) {
                         downward_fault = true;
-                     //   ESP_LOGW(TAG_ECHO, "Downward sensor %d out of range: %.2f cm", i + 1, distance_cm);
+                        ESP_LOGW(TAG_ECHO, "Downward sensor %d out of range: %.2f cm", i + 1, distance_cm);
                     } else {
                         downward_fault = false;
                     }
                 }
             } else {
-      //          ESP_LOGW(TAG_ECHO, "Sensor %d OUT OF RANGE or no echo", i + 1);
+                ESP_LOGW(TAG_ECHO, "Sensor %d OUT OF RANGE or no echo", i + 1);
             }
 
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -69,9 +69,9 @@ void echo_sensor(void *pvParameter) {
         }
 
         if (sensor_fault) {
-   //         ESP_LOGE(TAG_ECHO, "SENSOR FAULT TRIGGERED");
+            ESP_LOGE(TAG_ECHO, "SENSOR FAULT TRIGGERED");
         } else {
-    //        ESP_LOGD(TAG_ECHO, "No sensor fault");
+            ESP_LOGD(TAG_ECHO, "No sensor fault");
         }
 
         ESP_LOGD(TAG_ECHO,
@@ -83,3 +83,4 @@ void echo_sensor(void *pvParameter) {
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
+
