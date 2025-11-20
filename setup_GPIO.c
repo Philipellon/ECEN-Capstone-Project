@@ -47,6 +47,6 @@ int calibrate_joystick(adc_channel_t channel) {
 int read_joystick(adc_channel_t channel) {
     int raw_value = adc1_get_raw(channel);  // Read raw ADC value from the joystick
     int voltage = (raw_value * VREF) / ADC_MAX_VALUE;  // Convert to mV (millivolts)
-    printf("Voltage =%d\n", voltage);
+    //printf("Voltage =%d\n", voltage);
     return voltage;  // Return the voltage value
 }

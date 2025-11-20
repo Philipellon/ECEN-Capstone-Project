@@ -1,4 +1,4 @@
-#include "C:/Users/Salee/Downloads/Impulse3FlashTest5_404/main/prototype4.h"
+#include "prototype4.h"
 
 void motor_controller() {
     int UD = read_joystick(JOYSTICK_UD);

@@ -29,14 +29,14 @@ extern "C" {
 #define MAX_ECHO_TIMEOUT_US 100
 
 // ---------- Transistor pins (typed as gpio_num_t enum) ----------
-#define TRANS1  GPIO_NUM_14
-#define TRANS2  GPIO_NUM_21
-#define TRANS3  GPIO_NUM_47
-#define TRANS4  GPIO_NUM_48
-#define TRANS5  GPIO_NUM_13
-#define TRANS6  GPIO_NUM_12
-#define TRANS7  GPIO_NUM_2
-#define TRANS8  GPIO_NUM_1
+#define TRANS1  GPIO_NUM_14 // R1
+#define TRANS2  GPIO_NUM_21 // R2
+#define TRANS3  GPIO_NUM_47 // R7 
+#define TRANS4  GPIO_NUM_48 // R8
+#define TRANS5  GPIO_NUM_13 // R9
+#define TRANS6  GPIO_NUM_12 // R10
+#define TRANS7  GPIO_NUM_2  // R15
+#define TRANS8  GPIO_NUM_1  // R16
 
 // ---------- Ultrasonic pins ----------
 #define ECHO1     GPIO_NUM_39
@@ -61,13 +61,23 @@ extern "C" {
 #define ADC_WIDTH    ADC_WIDTH_BIT_12
 #define ADC_ATTEN    ADC_ATTEN_DB_12
 
+// Joystick calibration
+extern int UPMID;
+extern int LRMID;
+extern int sensor_fault;
+
+void sonar_observation(int idx, float dist_m);
+
+
 // Prototypes
 void  echo_sensor(void *pvParameter);
 void  motor_controller(void);
 void  init_gpio(void);
+void  init_adc(void);
+int   read_joystick(adc_channel_t channel);
+int   calibrate_joystick(adc_channel_t channel);
 float trigger_sensor(gpio_num_t trigger_pin, gpio_num_t echo_pin);
 
 #ifdef __cplusplus
 }
 #endif
-

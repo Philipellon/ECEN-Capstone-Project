@@ -32,18 +32,45 @@ extern "C" {
 #define MAX_STA_CONN 4
 
 static const char *TAG = "ESP32-S3_AP";
+static const char *TAG_VOICE = "VOICE";
+
 
 // -------- Voice confidence thresholds --------
-#define CONF_THR_MOVE   0.95f   // Forward/Backward/Left/Right must be >= 0.80
+#define CONF_THR_MOVE   0.75f   // Forward/Backward/Left/Right must be >= 0.80
 #define CONF_THR_STOP   0.50f   // Stop can be more permissive (safer)
-
-// ---- Sonar presence gate ----
-static volatile bool sensors_connected = false;
 
 // Make these arrays file-scope so both init + presence task can use them
 static const gpio_num_t kTrigPins[6] = { TRIGGER1, TRIGGER2, TRIGGER3, TRIGGER4, TRIGGER5, TRIGGER6 };
 static const gpio_num_t kEchoPins[6] = { ECHO1,    ECHO2,    ECHO3,    ECHO4,    ECHO5,    ECHO6    };
 
+// ---- Sonar print helper config ----
+#define OBSTACLE_NEAR_M   0.60f   // <= this = obstacle
+#define OBSTACLE_CLEAR_M  0.80f   // >= this = considered clear (hysteresis)
+#define SONAR_REMIND_MS   2000    // reprint status every 2s if unchanged
+
+// Name your sensors (adjust order to match TRIG/ECHO indexing)
+static const char* kSonarName[6] = {
+    "S1", "S2", "S3", "S4", "S5", "S6"
+    // e.g., "Front-Left","Front","Front-Right","Left","Right","Rear"
+};
+
+typedef struct {
+    volatile bool        obstacle;     // debounced state
+    volatile float       last_dist_m;  // last measured distance
+    volatile TickType_t  last_print;   // last time we printed
+} SonarState;
+
+static SonarState g_sonar[6] = {0};
+
+// ------------------ E-STOP (momentary hold) ------------------
+#define ESTOP_PIN           GPIO_NUM_41
+#define ESTOP_DEBOUNCE_MS   30
+static volatile bool     estop_pressed = false;     // active-low while button held
+static volatile uint32_t estop_last_isr_ticks = 0;  // debounce
+
+static void pwm_all_off(void);   // fwd
+static void estop_force_stop_now(void);
+static inline bool estop_is_pressed(void) { return estop_pressed; }
 
 // ------------------ Motor PWM ------------------
 static const gpio_num_t kAllTrans[] = {
@@ -54,7 +81,7 @@ static const gpio_num_t kAllTrans[] = {
 #define PWM_RES_BITS    12
 #define PWM_RES_ENUM    LEDC_TIMER_12_BIT
 #define PWM_MAX_DUTY    ((1U << PWM_RES_BITS) - 1)
-#define SPEED_DUTY_PCT  60
+#define SPEED_DUTY_PCT  75
 
 static const TickType_t BRAKE_MS = pdMS_TO_TICKS(400);
 static ledc_channel_config_t s_ch[8];
@@ -64,6 +91,11 @@ typedef enum { CMD_NONE=0, CMD_FORWARD, CMD_BACK, CMD_LEFT, CMD_RIGHT, CMD_STOP 
 static Command current_cmd = CMD_NONE;
 static Command last_cmd_manual = CMD_NONE;
 static Command last_cmd_voice = CMD_NONE;
+
+#define LOG_BUFFER_SIZE 8192
+static char log_buffer[LOG_BUFFER_SIZE];
+static size_t log_write_pos = 0;
+
 
 // ---------- Voice latch state ----------
 static volatile bool   voice_active   = false;                    // true while voice is driving motion
@@ -129,6 +161,50 @@ static void drive_pwm(Command cmd, uint32_t duty){
   }
 }
 
+// -------------- E-STOP helpers --------------
+static void estop_force_stop_now(void) {
+    pwm_all_off();
+    current_cmd     = CMD_STOP;
+    last_cmd_manual = CMD_NONE;
+    voice_active    = false;
+    last_cmd_voice  = CMD_NONE;
+}
+
+static void IRAM_ATTR estop_isr(void *) {
+    const TickType_t now = xTaskGetTickCountFromISR();
+    if ((now - estop_last_isr_ticks) > pdMS_TO_TICKS(ESTOP_DEBOUNCE_MS)) {
+        const bool level_low = (gpio_get_level(ESTOP_PIN) == 0);
+        estop_pressed = level_low;
+        if (level_low) {
+            estop_force_stop_now();
+            ESP_EARLY_LOGW(TAG, "E-STOP pressed -> MOTORS OFF");
+        } else {
+            ESP_EARLY_LOGI(TAG, "E-STOP released -> control may resume");
+        }
+        estop_last_isr_ticks = now;
+    }
+}
+
+static void estop_init(void) {
+    gpio_config_t cfg{};
+    cfg.mode = GPIO_MODE_INPUT;
+    cfg.pin_bit_mask = (1ULL << ESTOP_PIN);
+    cfg.pull_up_en = GPIO_PULLUP_ENABLE;      // pull-up so button to GND works
+    cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    cfg.intr_type = GPIO_INTR_ANYEDGE;        // press+release
+    ESP_ERROR_CHECK(gpio_config(&cfg));
+
+    ESP_ERROR_CHECK(gpio_install_isr_service(0));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(ESTOP_PIN, estop_isr, nullptr));
+
+    estop_pressed = (gpio_get_level(ESTOP_PIN) == 0);
+    if (estop_pressed) {
+        estop_force_stop_now();
+        ESP_LOGW(TAG, "E-STOP low at boot; holding STOP while pressed");
+    } else {
+        ESP_LOGI(TAG, "E-STOP ready on GPIO%d (active-low, momentary)", (int)ESTOP_PIN);
+    }
+}
 
 // ------------------ SENSOR GPIO INIT ------------------
 static void sonar_gpio_init(void) {
@@ -158,31 +234,17 @@ static void sonar_gpio_init(void) {
     ESP_LOGI(TAG, "Sonar GPIO initialized");
 }
 
-static void sonar_presence_task(void *arg) {
-    const TickType_t period = pdMS_TO_TICKS(2000); // check every 2s
-    while (true) {
-        int good = 0;
-        for (int i = 0; i < 6; i++) {
-            // trigger_sensor() should timeout internally if nothing is connected
-            float d = trigger_sensor(kTrigPins[i], kEchoPins[i]);
-            if (d > 0.05f && d < 4.0f) { // 5 cm to 4 m = "plausible"
-                good++;
-            }
-        }
-        bool new_state = (good >= 1);
-        if (new_state != sensors_connected) {
-            sensors_connected = new_state;
-            ESP_LOGI(TAG, "Sonar presence: %s", sensors_connected ? "CONNECTED" : "NOT CONNECTED");
-        }
-        vTaskDelay(period);
-    }
-}
 
 // Unified update (manual > voice), with SENSOR SAFETY on voice only
 static void update_wheelchair(Command new_cmd, bool from_manual){
+    if (estop_is_pressed() && current_cmd != CMD_STOP) {
+            drive_pwm(CMD_STOP, 0);
+            current_cmd = CMD_STOP;
+        return;
+    }
+
     // If this is NOT manual (i.e., voice), block motion on fault only if sensors are connected
-    if (!from_manual && sensors_connected && sensor_fault &&
-        (new_cmd != CMD_STOP && new_cmd != CMD_NONE)) {
+    if (!from_manual && sensor_fault && (new_cmd != CMD_STOP && new_cmd != CMD_NONE)) {
         if (current_cmd != CMD_STOP) {
             ESP_LOGW(TAG, "SENSOR FAULT — voice blocked, forcing STOP");
             drive_pwm(CMD_STOP, 0);
@@ -191,14 +253,18 @@ static void update_wheelchair(Command new_cmd, bool from_manual){
         return;
     }
 
-   if (new_cmd == current_cmd) return;
+    if (new_cmd == current_cmd) {
+        //ESP_LOGW(TAG, "Before return statement");
+        return;
+    } 
 
    // Brake between direction changes
    drive_pwm(CMD_STOP, 0);
    vTaskDelay(BRAKE_MS);
 
-   if (new_cmd != CMD_NONE && new_cmd != CMD_STOP)
-       drive_pwm(new_cmd, duty_from_pct(SPEED_DUTY_PCT));
+    if (new_cmd != CMD_NONE && new_cmd != CMD_STOP) {
+        drive_pwm(new_cmd, duty_from_pct(SPEED_DUTY_PCT));
+    }
 
    current_cmd = new_cmd;
 }
@@ -274,6 +340,36 @@ static esp_err_t command_get_handler(httpd_req_t *req)  // keep as-is below
    return ESP_OK;
 }
 
+
+// TO THIS:
+static int my_log_handler(const char *fmt, va_list args)
+{
+    char msg[256];
+
+    // Copy the va_list so we can use it twice
+    va_list args_copy;
+    va_copy(args_copy, args);
+
+    int len = vsnprintf(msg, sizeof(msg), fmt, args_copy);
+    va_end(args_copy);
+
+    if (len > 0) {
+        if (len > (int)sizeof(msg)) {
+            len = sizeof(msg);
+        }
+        for (int i = 0; i < len; ++i) {
+            log_buffer[log_write_pos] = msg[i];
+            log_buffer[log_write_pos] = msg[i];
+            log_write_pos = (log_write_pos + 1) % LOG_BUFFER_SIZE;
+        }
+    }
+
+    // Print to UART so Serial Monitor still works
+    int written = vprintf(fmt, args);
+    return written;
+}
+
+
 static esp_err_t direct_command_handler(httpd_req_t *req) {
     const char *uri = req->uri;  // e.g., "/forward"
     Command cmd = CMD_NONE;
@@ -304,15 +400,87 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
     char json[256];
     snprintf(json, sizeof(json),
             "{\"motorsActive\":%s,\"currentCmd\":%d,\"pwm\":%lu,"
-            "\"sensorFault\":%d,\"sensorsConnected\":%s}",
+            "\"sensorFault\":%s,\"estopPressed\":%s}",
             (current_cmd != CMD_NONE && current_cmd != CMD_STOP) ? "true" : "false",
             current_cmd,
             (unsigned long)duty_from_pct(SPEED_DUTY_PCT),
-            sensor_fault,
-            sensors_connected ? "true" : "false");
+            sensor_fault ? "true" : "false",
+            estop_is_pressed() ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, json);
+    return ESP_OK;
+}
+
+
+
+static esp_err_t logs_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/plain");
+
+    size_t pos = log_write_pos;
+
+    // Stream logs in order
+    for (size_t i = 0; i < LOG_BUFFER_SIZE; i++) {
+        char c = log_buffer[(pos + i) % LOG_BUFFER_SIZE];
+        httpd_resp_send_chunk(req, &c, 1);
+    }
+
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
+// ===========================================================
+// Auto-refreshing monitor HTML page
+// ===========================================================
+static const char *MONITOR_HTML = R"HTML(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ESP32 Monitor</title>
+  <style>
+    body {
+      font-family: monospace;
+      background: #111;
+      color: #0f0;
+      margin: 0;
+      padding: 0;
+    }
+    #log {
+      white-space: pre-wrap;
+      padding: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div id="log">Loading...</div>
+  <script>
+    async function fetchLogs() {
+      try {
+        const res = await fetch('/monitor', { cache: 'no-store' });
+        const text = await res.text();
+        const logDiv = document.getElementById('log');
+        logDiv.textContent = text;
+        window.scrollTo(0, document.body.scrollHeight);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    // Poll every 1 second
+    fetchLogs();
+    setInterval(fetchLogs, 1000);
+  </script>
+</body>
+</html>
+)HTML";
+
+
+static esp_err_t monitor_page_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, MONITOR_HTML, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 
@@ -327,6 +495,32 @@ static httpd_handle_t start_webserver(void){
         httpd_uri_t status_uri = { .uri="/status", .method=HTTP_GET, .handler=status_get_handler, .user_ctx=nullptr };
         httpd_register_uri_handler(server, &status_uri);
 
+        httpd_uri_t logs_uri = {
+            .uri       = "/logs",
+            .method    = HTTP_GET,
+            .handler   = logs_get_handler,
+            .user_ctx  = nullptr
+        };
+        httpd_register_uri_handler(server, &logs_uri);
+
+        // NEW: alias /monitor → same handler as /logs
+        httpd_uri_t monitor_uri = {
+            .uri       = "/monitor",
+            .method    = HTTP_GET,
+            .handler   = logs_get_handler,
+            .user_ctx  = nullptr
+        };
+        httpd_register_uri_handler(server, &monitor_uri);
+
+        httpd_uri_t console_uri = {
+            .uri      = "/console",
+            .method   = HTTP_GET,
+            .handler  = monitor_page_handler,
+            .user_ctx = nullptr
+        };
+        httpd_register_uri_handler(server, &console_uri);
+
+
         const char* dirs[] = {"/forward", "/backward", "/left", "/right", "/stop"};
         for(int i = 0; i < 5; i++){
             httpd_uri_t cmd_uri = { .uri=dirs[i], .method=HTTP_GET, .handler=direct_command_handler, .user_ctx=nullptr };
@@ -336,6 +530,7 @@ static httpd_handle_t start_webserver(void){
 
     return server;
 }
+
 
 // ------------------ I2S Audio + Edge Impulse ------------------
 #define I2S_PORT          I2S_NUM_0
@@ -379,10 +574,62 @@ static inline float threshold_for(Command c) {
         default:          return 1.0f; // CMD_NONE -> never passes
     }
 }
+
+extern "C" void sonar_observation(int idx, float dist_m) {
+    if (idx < 0 || idx >= 6) return;
+
+    // Normalize impossible readings
+    const bool valid = (dist_m > 0.02f && dist_m < 6.0f); // 2 cm .. 6 m (tweak as needed)
+    TickType_t now = xTaskGetTickCount();
+
+    // Decide desired state with hysteresis
+    bool want_obstacle = false;
+    if (valid) {
+        if (!g_sonar[idx].obstacle) {
+            // currently clear -> only set if "near"
+            want_obstacle = (dist_m <= OBSTACLE_NEAR_M);
+        } else {
+            // currently obstacle -> stay until it is "clear" distance
+            want_obstacle = !(dist_m >= OBSTACLE_CLEAR_M);
+        }
+    } else {
+        // Invalid reading: keep current state, but allow reminders
+        want_obstacle = g_sonar[idx].obstacle;
+    }
+
+    // Edge change?
+    if (want_obstacle != g_sonar[idx].obstacle) {
+        g_sonar[idx].obstacle = want_obstacle;
+        g_sonar[idx].last_print = now;
+
+        if (want_obstacle) {
+            ESP_LOGW("SONAR", "[%s] OBSTACLE at %.2f m", kSonarName[idx], dist_m);
+        } else {
+            ESP_LOGI("SONAR", "[%s] CLEAR (%.2f m)", kSonarName[idx], dist_m);
+        }
+    } else {
+        // Periodic reminder (rate-limited)
+        if ((now - g_sonar[idx].last_print) > pdMS_TO_TICKS(SONAR_REMIND_MS)) {
+            g_sonar[idx].last_print = now;
+            if (g_sonar[idx].obstacle) {
+                ESP_LOGW("SONAR", "[%s] still BLOCKED ~%.2f m", kSonarName[idx], dist_m);
+            } else {
+                if (valid)
+                    ESP_LOGI("SONAR", "[%s] still CLEAR ~%.2f m", kSonarName[idx], dist_m);
+                else
+                    ESP_LOGI("SONAR", "[%s] no valid echo", kSonarName[idx]);
+            }
+        }
+    }
+
+    g_sonar[idx].last_dist_m = valid ? dist_m : -1.0f;
+}
+
+
 static void voice_task(void*) {
     ei_impulse_result_t result;
     const uint32_t duty = duty_from_pct(SPEED_DUTY_PCT);
-    ei_printf("Voice control ready\r\n");
+    ESP_LOGI(TAG_VOICE, "Voice control ready\r\n");
 
     // initialize as timed-out (no voice command yet)
     last_voice_tick = xTaskGetTickCount();
@@ -390,20 +637,31 @@ static void voice_task(void*) {
     last_cmd_voice  = CMD_NONE;
 
     while (true) {
+
+        // Immediate safety: while E-STOP is pressed, hold STOP and skip control
+        if (estop_is_pressed()) {
+            if (current_cmd != CMD_STOP) {
+                update_wheelchair(CMD_STOP, /*from_manual=*/false);
+            }
+            voice_active   = false;
+            last_cmd_voice = CMD_NONE;
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
         // =============== Immediate safety / override checks =================
         // 1) If app/manual control is active, release voice latch (app owns outputs)
         if (last_cmd_manual != CMD_NONE && voice_active) {
             voice_active   = false;     // stop steering outputs via voice
             // Don't force STOP here—manual might be intentionally moving.
-            ei_printf("Voice latch released due to manual override\r\n");
+            ESP_LOGI(TAG_VOICE, "Voice latch released due to manual override\r\n");
         }
 
         // 2) If sensors fault while voice is in control, force STOP + clear latch
-        if (sensors_connected && sensor_fault && voice_active && last_cmd_manual == CMD_NONE) {
+        if (sensor_fault && voice_active && last_cmd_manual == CMD_NONE) {
             voice_active   = false;
             last_cmd_voice = CMD_NONE;
             update_wheelchair(CMD_STOP, /*from_manual=*/false);   // <-- FIX: 2 args
-            ei_printf("Voice blocked: SENSOR_FAULT → STOP\r\n");
+            ESP_LOGI(TAG_VOICE, "Voice blocked: SENSOR_FAULT → STOP\r\n");
             // keep looping; we will wait for a fresh valid command after fault clears
         }
 
@@ -422,6 +680,14 @@ static void voice_task(void*) {
 
         if (run_classifier(&sig, &result, false) != EI_IMPULSE_OK) {
             continue;
+        }
+
+        ESP_LOGI("PREDICT", "----- Inference Results -----");
+        for (size_t i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
+            ESP_LOGI("PREDICT", "  %s : %.4f",
+                result.classification[i].label,
+                result.classification[i].value
+            );
         }
 
         // =================== Top label + confidence pick ====================
@@ -456,9 +722,10 @@ static void voice_task(void*) {
             if (last_cmd_manual == CMD_NONE) {
                 update_wheelchair(CMD_STOP, /*from_manual=*/false);
             }
-            ei_printf("Voice Command: STOP (%.2f) → STOP\r\n", conf);
+            ESP_LOGE(TAG_VOICE, "Voice Command: STOP (%.2f) → STOP\r\n", conf);
         }
         else if (detected != CMD_NONE) {
+
             // We heard a valid directional command: refresh the timeout clock
             last_voice_tick = xTaskGetTickCount();
 
@@ -468,12 +735,13 @@ static void voice_task(void*) {
                 voice_active   = true;
 
                 // Voice only drives when there is no manual/app override
-                if (last_cmd_manual == CMD_NONE && !(sensor_fault && sensor_fault)) {
+                if (!sensor_fault) {
                     update_wheelchair(detected, /*from_manual=*/false);
-                } else if (sensor_fault && sensor_fault) {
+                    ESP_LOGE("VOICE", "Voice Command: %d (%.2f) → %d", detected, conf, detected);
+                } else if (sensor_fault) {
                     voice_active   = false;
                     last_cmd_voice = CMD_NONE;
-                    ei_printf("Voice cmd gated by SENSOR_FAULT\r\n");
+                    ESP_LOGI(TAG_VOICE, "Voice cmd gated by SENSOR_FAULT\r\n");
                 }
             }
             // If detected == last_cmd_voice, we still refreshed last_voice_tick above,
@@ -491,7 +759,7 @@ static void voice_task(void*) {
                 voice_active   = false;
                 last_cmd_voice = CMD_NONE;
                 update_wheelchair(CMD_STOP, /*from_manual=*/false);
-                ei_printf("Voice timeout (15s) → STOP\r\n");
+                ESP_LOGI(TAG_VOICE, "Voice timeout (15s) → STOP\r\n");
             }
         }
     }
@@ -505,10 +773,13 @@ extern "C" void app_main(void) {
        ESP_ERROR_CHECK(nvs_flash_init());
    }
 
+   esp_log_set_vprintf(my_log_handler);
+
    wifi_init_softap();
    pwm_init();
    sonar_gpio_init();                       // <-- NEW: set up sonar pins
-
+   estop_init();
+   
    if(i2s_init_audio()!=ESP_OK){
        ESP_LOGE(TAG,"I2S init failed");
        return;
@@ -519,7 +790,6 @@ extern "C" void app_main(void) {
 
    // Start tasks
    xTaskCreate(voice_task, "voice_task", 16000, nullptr, 5, nullptr);
-   xTaskCreate(sonar_presence_task, "sonar_presence", 3072, nullptr, 4, nullptr);
    xTaskCreate(echo_sensor, "echo_sensor", 4096, nullptr, 6, nullptr); // <-- NEW: sensor task
 
 }
