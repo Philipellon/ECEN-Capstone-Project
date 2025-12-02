@@ -36,8 +36,8 @@ static const char *TAG_VOICE = "VOICE";
 
 
 // -------- Voice confidence thresholds --------
-#define CONF_THR_MOVE   0.75f   // Forward/Backward/Left/Right must be >= 0.80
-#define CONF_THR_STOP   0.50f   // Stop can be more permissive (safer)
+#define CONF_THR_MOVE   0.98f   // Forward/Backward/Left/Right must be >= 0.80
+#define CONF_THR_STOP   0.35f   // Stop can be more permissive (safer)
 
 // Make these arrays file-scope so both init + presence task can use them
 static const gpio_num_t kTrigPins[6] = { TRIGGER1, TRIGGER2, TRIGGER3, TRIGGER4, TRIGGER5, TRIGGER6 };
@@ -81,7 +81,7 @@ static const gpio_num_t kAllTrans[] = {
 #define PWM_RES_BITS    12
 #define PWM_RES_ENUM    LEDC_TIMER_12_BIT
 #define PWM_MAX_DUTY    ((1U << PWM_RES_BITS) - 1)
-#define SPEED_DUTY_PCT  75
+#define SPEED_DUTY_PCT  60
 
 static const TickType_t BRAKE_MS = pdMS_TO_TICKS(400);
 static ledc_channel_config_t s_ch[8];
