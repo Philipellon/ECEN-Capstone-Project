@@ -1,0 +1,12 @@
+Output: NC Drill Files
+Type  : NC Drill
+From  : Project [Capstone_board.PrjPcb]
+   Generated File[Capstone_boardv2.TXT]
+   Generated File[Capstone_boardv2.LDP]
+   Generated File[Capstone_boardv2.DRR]
+
+
+Files Generated   : 3
+Documents Printed : 0
+
+Finished Output Generation At 8:45:53 AM On 12/4/2025
